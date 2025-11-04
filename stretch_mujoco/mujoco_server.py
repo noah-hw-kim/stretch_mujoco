@@ -38,6 +38,12 @@ class MujocoServerProxies:
     _cameras: "DictProxy[str, StatusStretchCameras]"
     _sensors: "DictProxy[str, StatusStretchSensors]"
     _joint_limits: "DictProxy[str, dict[Actuators, tuple[float, float]]]"
+    
+    # ===== Additions: objects state and tracking (11/2/2025) =====
+    _objects_state: "DictProxy[str, dict]"           # {"val": {name: ((x,y,z),(qx,qy,qz,qw))}}
+    _sim_time: "DictProxy[str, float]"               # {"val": float}
+    _tracked_names: "list"                           # manager.list() of names
+    # ===== END =====
 
     def __setattr__(self, name: str, value) -> None:
         try:
@@ -77,6 +83,34 @@ class MujocoServerProxies:
         limits[actuator] = min_max
 
         self._joint_limits["val"] = limits
+        
+    
+    # ===== New helper API (usable from client via sim.data_proxies) (11/2/2025) =====
+    def set_tracked_objects(self, names: list[str]) -> None:
+        try:
+            self._tracked_names[:] = list(names)
+        except BrokenPipeError:
+            ...
+
+    def get_tracked_objects(self) -> list[str]:
+        try:
+            return list(self._tracked_names)
+        except BrokenPipeError:
+            return []
+
+    def set_objects_state(self, time_value: float, mapping: dict[str, tuple[tuple[float, float, float], tuple[float, float, float, float]]]) -> None:
+        try:
+            self._sim_time["val"] = time_value
+            self._objects_state["val"] = mapping
+        except BrokenPipeError:
+            ...
+
+    def get_objects_state(self) -> tuple[float, dict[str, tuple[tuple[float, float, float], tuple[float, float, float, float]]]]:
+        try:
+            return self._sim_time["val"], dict(self._objects_state["val"])
+        except BrokenPipeError:
+            return 0.0, {}
+    # ===== END =====
 
     @staticmethod
     def default(manager: SyncManager) -> "MujocoServerProxies":
@@ -86,6 +120,12 @@ class MujocoServerProxies:
             _cameras=manager.dict({"val": StatusStretchCameras.default()}),
             _sensors=manager.dict({"val": StatusStretchSensors.default()}),
             _joint_limits=manager.dict({"val": {}}),
+            
+            # ===== new (11/2/2025) =====
+            _objects_state=manager.dict({"val": {}}),
+            _sim_time=manager.dict({"val": 0.0}),
+            _tracked_names=manager.list(),
+            # ===== END =====
         )
 
 
@@ -237,6 +277,10 @@ class MujocoServer:
             sensors_to_use=StretchSensors.from_mjmodel(self.mjmodel),
             mujoco_server=self,
         )
+        
+        # ===== new (11/2/2025) =====
+        self._tracked_body_ids: dict[str, int] = {}   # cache name->body id
+        # ===== END =====
 
         self.update_joint_limits()
 
@@ -425,6 +469,11 @@ class MujocoServer:
 
         self.physics_fps_counter.tick(sim_time=data.time)
         self.pull_status()
+        
+        # ===== new (11/2/2025) =====
+        self._publish_objects_state()
+        # ===== END =====
+        
         self.push_command(self.data_proxies.get_command())
 
     def pull_status(self):
@@ -551,3 +600,39 @@ class MujocoServer:
             config.robot_settings["gripper_min_max"],
             config.robot_settings["sim_gripper_min_max"],
         )
+
+    
+    # ===== new (11/2/2025) =====
+    def _publish_objects_state(self) -> None:
+        """
+        If client registered object names, publish their world pos/quat.
+        """
+        names = self.data_proxies.get_tracked_objects()
+        if not names:
+            return
+
+        # Resolve ids if the set changed
+        if set(names) != set(self._tracked_body_ids.keys()):
+            resolved = {}
+            for n in names:
+                try:
+                    bid = mujoco._functions.mj_name2id(self.mjmodel, mujoco._enums.mjtObj.mjOBJ_BODY, n)
+                    if bid >= 0:
+                        resolved[n] = bid
+                except Exception:
+                    ...
+            self._tracked_body_ids = resolved
+
+        if not self._tracked_body_ids:
+            self.data_proxies.set_objects_state(self.mjdata.time, {})
+            return
+
+        mapping: dict[str, tuple[tuple[float, float, float], tuple[float, float, float, float]]] = {}
+        for name, bid in self._tracked_body_ids.items():
+            pos = tuple(float(x) for x in self.mjdata.xpos[bid])
+            quat = tuple(float(x) for x in self.mjdata.xquat[bid])
+            mapping[name] = (pos, quat)
+
+        self.data_proxies.set_objects_state(self.mjdata.time, mapping)
+    
+    # ===== END =====
