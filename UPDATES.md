@@ -39,15 +39,6 @@ for body_name, info in objects_info.items():
 
 - need to get the real time object locations
 
-FINDINGS (on the default view of the room)
-- X increases when the robot moves from left to right of the room
-- Y increases when the robot moves from front to back of the room (counter/cabinet is closer to the backside of the room)
-- Z increases when the robot moves from low to high of the room
-
-- Z is the up and down (think the direction of the lift up and down)
-- X is the left and right 
-- Y is the forward and backward (think the direction of the arm forward and backward)
-
 
 
 
@@ -82,6 +73,20 @@ Object 3D model (asset): one specific file for a category (e.g., objaverse/mug_1
 Pose: where the object is placed in the world (position + orientation). This changes during simulation.
 MuJoCo model (world): the entire compiled simulation (all bodies, joints, geoms) that the physics engine uses.
 
+4. FINDINGS (on the default view of the room)
+- X increases when the robot moves away from the left wall
+- Y increases when the robot moves away from counter/cabinet (thickness of counter/cabinet is around 0.7 (y value estimate))
+- Z increases when the robot moves from low to high of the room
+
+5. Ingnore warnings
+- commented out (mujoco_server_passive.py)
+
+```
+click.secho(
+                #         f"WARNING: Passive viewer and camera rendering is below the requested {1/self.camera_manager.camera_rate}FPS on the last render.",
+                #         fg="yellow",
+                #     )
+```
 
 
 ## Future Tasks
@@ -99,10 +104,19 @@ MuJoCo model (world): the entire compiled simulation (all bodies, joints, geoms)
 
 - real
 1. d405 rgb (w,h,c)
+(480,848)
+
+can adjust with 
+#width, height, fps = 1280, 720, 5
+#width, height, fps = 848, 480, 10
+#width, height, fps = 640, 480, 30
 
 2. d435 rgb (w,h,c)
+low resolution (240,424)
+high resolution (720,1280)
 
 3. nav (w,h,c)
+(600, 800, 3)
 
 - joint value (double check)
 

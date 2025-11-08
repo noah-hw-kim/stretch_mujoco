@@ -181,71 +181,6 @@ def model_generation_wizard(
         use_camera_obs=False,
         control_freq=20,
     )
-  
-    """
-    ============ Manually updated on 10/26/2025 to have exact same objects for testing ============
-    
-    """
-    # print("env.object_cfgs: ")
-    # print(env.object_cfgs)
-    
-    import copy
-    from robocasa.models.objects.kitchen_objects import OBJ_CATEGORIES
-    
-    # Choose your categories (order defines object names)
-    wanted = ["apple", "avocado", "banana"]
-
-    def first_asset(cat, prefer="objaverse"):
-        regs = list(OBJ_CATEGORIES[cat].keys())
-        reg = prefer if prefer in regs else regs[0]
-        paths = OBJ_CATEGORIES[cat][reg].mjcf_paths
-        if not paths:
-            # fallback to any other registry
-            for r in regs:
-                if OBJ_CATEGORIES[cat][r].mjcf_paths:
-                    return OBJ_CATEGORIES[cat][r].mjcf_paths[0]
-            raise RuntimeError(f"No assets available for category: {cat}")
-        return paths[0]
-    
-    tmpl_cfgs = copy.deepcopy(env.get_ep_meta()["object_cfgs"])
-    
-    # Keep only non-distractor object slots as candidates
-    slots = [c for c in tmpl_cfgs if c.get("type", "object") == "object"]
-    if len(slots) < len(wanted):
-        raise RuntimeError(f"Template only has {len(slots)} usable slots; need {len(wanted)}.")
-
-    # 3) Build edited cfgs: reuse placement from template, swap in exact assets you want
-    edited_cfgs = []
-    for cat, slot in zip(wanted, slots):
-        slot = copy.deepcopy(slot)              # don’t mutate original
-        slot["name"] = f"{cat}0"               # nicer, deterministic names
-        slot["info"] = {
-            "cat": cat,
-            "mjcf_path": first_asset(cat, prefer="objaverse"),
-        }
-        # leave slot["placement"] and other fields intact so placement logic still works
-        edited_cfgs.append(slot)
-
-    # If you want ONLY your three objects, don’t append any of the other original cfgs.
-    # If you want to keep some original objects, append them to edited_cfgs here.
-
-    # 4) Inject and reset — Kitchen will now build exactly your objects and sample placements for them
-    env.set_ep_meta({"object_cfgs": edited_cfgs})
-    obs = env.reset()
-    
-    print("Initial observation keys:", obs.keys())
-    
-    # Optional: verify the objects selected
-    print("env.object_cfgs after override:")
-    for i, cfg in enumerate(env.object_cfgs):
-        print(f"{i}: name={cfg['name']:10s}  cat={cfg['info']['cat']:10s}  model={cfg['info']['mjcf_path']}")
-    
-    
-    """
-    ====================== End =====================================
-    """
-    
-    
     print(
         colored(
             f"Showing configuration:\n    Layout: {layouts[layout]}\n    Style: {styles[style]}",
@@ -343,9 +278,3 @@ def add_stretch_to_kitchen(xml: str, robot_pose_attrib: dict) -> str:
         f' <include file="{stretch_xml_absolute}"/>',
     )
     return xml
-
-
-
-
-
-

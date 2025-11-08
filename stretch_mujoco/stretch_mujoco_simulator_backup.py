@@ -30,8 +30,6 @@ from stretch_mujoco.datamodels.status_command import (
 import stretch_mujoco.utils as utils
 from stretch_mujoco.utils import require_connection, block_until_check_succeeds
 
-from typing import Iterable, Optional, Dict, Any
-
 
 class StretchMujocoSimulator:
     """
@@ -528,48 +526,3 @@ class StretchMujocoSimulator:
             return False
 
         return not self.is_stop_called
-
-    
-    """
-    ============ Manually updated on 11/2/2025 to track object locs ============
-    
-    """
-    def register_tracked_objects(self, names: Iterable[str]) -> None:
-        """
-        Tell the server which object body names to publish (set in one shot).
-        """
-        self.data_proxies.set_tracked_objects(list(names))
-
-    def pull_objects_state(self, names: Optional[Iterable[str]] = None) -> Dict[str, Dict[str, np.ndarray]]:
-        """
-        Return current poses for tracked objects (or set and return for `names`).
-        Output: {name: {"pos": (3,), "quat": (4,)}}, values are numpy arrays.
-        """
-        if names is not None:
-            self.data_proxies.set_tracked_objects(list(names))
-        t, mapping = self.data_proxies.get_objects_state()
-        # mapping: name -> ((x,y,z), (qx,qy,qz,qw))
-        return {
-            k: {"pos": np.asarray(v[0], dtype=float), "quat": np.asarray(v[1], dtype=float)}
-            for k, v in mapping.items()
-        }
-
-    def pull_all_objects_state(self, fallback_names: Optional[Iterable[str]] = None) -> Dict[str, Dict[str, np.ndarray]]:
-        """
-        Convenience: if nothing is tracked yet, optionally set `fallback_names`
-        (e.g., objects_info.keys()) once, then return current state.
-        """
-        t, mapping = self.data_proxies.get_objects_state()
-        if not mapping and fallback_names:
-            self.data_proxies.set_tracked_objects(list(fallback_names))
-            # allow the server a couple of ticks; caller can also sleep if needed
-            # (we keep this synchronous; next call should have data)
-            t, mapping = self.data_proxies.get_objects_state()
-        return {
-            k: {"pos": np.asarray(v[0], dtype=float), "quat": np.asarray(v[1], dtype=float)}
-            for k, v in mapping.items()
-        }
-    
-    """
-    ========== END ==========
-    """
