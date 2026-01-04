@@ -545,10 +545,17 @@ class StretchMujocoSimulator:
         Return current poses for tracked objects (or set and return for `names`).
         Output: {name: {"pos": (3,), "quat": (4,)}}, values are numpy arrays.
         """
+        if names is None:
+            pass
+        elif isinstance(names, str):
+            names = [names]
+        else:
+            names = list(names)  # normalize any iterable to a list
+
         if names is not None:
-            self.data_proxies.set_tracked_objects(list(names))
+            self.data_proxies.set_tracked_objects(names)
+
         t, mapping = self.data_proxies.get_objects_state()
-        # mapping: name -> ((x,y,z), (qx,qy,qz,qw))
         return {
             k: {"pos": np.asarray(v[0], dtype=float), "quat": np.asarray(v[1], dtype=float)}
             for k, v in mapping.items()

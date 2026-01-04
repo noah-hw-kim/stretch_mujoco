@@ -105,7 +105,6 @@ click.secho(
 - real
 1. d405 rgb (w,h,c)
 (480,848)
-
 can adjust with 
 #width, height, fps = 1280, 720, 5
 #width, height, fps = 848, 480, 10
@@ -121,6 +120,19 @@ high resolution (720,1280)
 - joint value (double check)
 
 
+### understand the env
+control the robot with the frontcam (nav cam). get the camera frame and get the object location
+apple location and robot location
+
+reinforcement learning process (reward and penalty) training on the agent.
+action successful or wrong (1,0)
+
+1. study about reinforcement learning (training agent)
+2. gripper location (can it move by itself to get the apple)
+
+
+### How to get the end-effector (EE) position from `sim.get_ee_pose()`
+
 
 
 ### move camera streaming to main thread
@@ -128,3 +140,4 @@ high resolution (720,1280)
 ### Neeed teleop like (WASD?)
 
 ### yolo detection
+
