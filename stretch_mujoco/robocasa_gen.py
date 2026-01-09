@@ -193,7 +193,7 @@ def model_generation_wizard(
     from robocasa.models.objects.kitchen_objects import OBJ_CATEGORIES
     
     # Choose your categories (order defines object names)
-    wanted = ["apple", "avocado", "banana"]
+    wanted = ["apple"]
 
     def first_asset(cat, prefer="objaverse"):
         regs = list(OBJ_CATEGORIES[cat].keys())
@@ -273,18 +273,34 @@ def model_generation_wizard(
             f"Placing [Object {i}] (category: {category}, body_name: {obj_name}_main) at "
             f"pos: {np.round(object_placements[obj_name][0],2)} quat: {np.round(object_placements[obj_name][1],2)}"
         )
+
+        # xml = xml_modify_body_pos(
+        #     xml,
+        #     "body",
+        #     obj_name + "_main",  # Object name ref in the xml
+        #     pos=object_placements[obj_name][0],
+        #     quat=object_placements[obj_name][1],
+        # )
+        # object_placements_info[obj_name + "_main"] = {
+        #     "cat": category,
+        #     "pos": object_placements[obj_name][0],
+        #     "quat": object_placements[obj_name][1],
+        # }
+        
+        # === MANUALLY UPDATED TO SET APPLE OBJECT POS FIXED
         xml = xml_modify_body_pos(
             xml,
             "body",
             obj_name + "_main",  # Object name ref in the xml
-            pos=object_placements[obj_name][0],
+            pos=np.array([0.7, -0.6, object_placements[obj_name][0][2]]),
             quat=object_placements[obj_name][1],
         )
         object_placements_info[obj_name + "_main"] = {
             "cat": category,
-            "pos": object_placements[obj_name][0],
+            "pos": np.array([0.7, -0.6, object_placements[obj_name][0][2]]),
             "quat": object_placements[obj_name][1],
         }
+        # === END ===
 
     xml, robot_base_fixture_pose = custom_cleanups(xml)
 
