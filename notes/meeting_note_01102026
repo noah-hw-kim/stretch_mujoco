@@ -1,0 +1,101 @@
+
+### 1/10/2026 Meeting Note
+#### Find what exactly ee position means (Is it the end of the gripper or the gripper joint that can be replaced)
+`sim.get_ee_pose()` returns the **end-effector (gripper tip) pose** as a 4x4 transform matrix in the world frame.
+
+- The EE **position** is the last column: `ee_pos = T[:3, 3]`
+- This matches what the env uses for `achieved_goal`
+
+```
+T = sim.get_ee_pose()
+print(T)
+print("ee_pos:", T[:3, 3])
+```
+
+Example output:
+```
+array([[ 0.013, -1.   , -0.   ,  0.704],
+       [ 1.   ,  0.013,  0.005, -0.583],
+       [-0.005, -0.   ,  1.   ,  1.026],
+       [ 0.   ,  0.   ,  0.   ,  1.   ]])
+```
+So `ee_pos ≈ [0.704, -0.583, 1.026]`.
+
+Compare with object state:
+```
+pprint(sim.pull_all_objects_state())
+```
+
+Example output:
+```
+{'apple0_main': {'pos': array([ 0.703, -0.58 ,  0.952]),
+                 'quat': array([ 0.945, -0.026,  0.041,  0.323])}}
+```
+
+Interpretation:
+- The EE is **roughly above** the apple in x/y, with a higher z (as expected).
+- Refer to screenshots: `ee_pos_reference1.png`, `ee_pos_reference2.png`.
+
+#### Double check if achieved_goal is actually reflecting the object position and desired_goal is reflecting the robot EE position
+Experiment: printed the end-effector (EE) position and the object position before/after moving the robot, to confirm what `achieved_goal` and `desired_goal` represent in the env.
+
+Before (roughly align EE and object height):
+```
+print(env._get_ee_pos())
+print(env._get_obj_pos())
+```
+EE:
+`[ 0.703 -0.789  0.961]`  
+Object:
+`[ 0.702 -0.598  0.952]`
+
+After (push object by moving the arm forward / along y):
+```
+print(env._get_ee_pos())
+print(env._get_obj_pos())
+```
+EE:
+`[ 0.708 -0.569  0.963]`  
+Object:
+`[ 0.704 -0.535  0.955]`
+
+Conclusion:
+- `achieved_goal` (and `env._get_ee_pos()`) is the **robot end-effector position** (gripper tip pose from `sim.get_ee_pose()`).
+- `desired_goal` (and `env._get_obj_pos()`) is the **object position** (from `sim.pull_objects_state()`).
+- Both values update as expected when the robot moves / contacts the object.
+
+#### When moving the arm forward/retract (or opening/closing the gripper), EE Z drops (lift “sag”)
+Observation:
+- When I move the arm forward/retract, or move the gripper open/close (with no explicit lift command), the EE Z sometimes decreases (lift/gripper appears to “go lower”).
+- Example:
+  - Before EE pos: `[ 0.707 -0.623  1.071]`
+  - After EE pos:  `[ 0.709 -0.55   1.041]`  (Z dropped by ~3 cm)
+
+Hypothesis / explanation:
+- This is likely **physical sag / compliance** (gravity + contact forces + actuator strength), not a coordinate bug.
+- If the env recomputes the next lift target from the *measured* lift position each step, sag can become a new commanded setpoint (“ratcheting down”) unless we hold a persistent command setpoint.
+
+Result / status:
+- Not fully explained yet (will investigate later), but it is **repeatable** with `env.step()` in some scenarios.
+- Notably, a single `sim.move_to(Actuators.arm, target)` does not always show the same visible lift drop.
+
+#### Gripper open and close is not consistent
+
+
+
+#### Make sure each steps actually being executed. PPO shouldn't be trained before the movement actually executed
+
+#### Is there an inverse kinematic function to use?
+- Inverse kinematic automatically calculate and move to x,y, or z with predefine combinations of using arm, lift, gripper, etc
+
+#### Follow this for the simplicity
+1. Home the lift above the table height
+2. Freeze other parts except the arm. Train to reach the target above
+3. Freeze other parts except the arm and gripper. Train to reach the target or above
+4. Freeze other parts except the arm, gripper, and lift. Train to reach the target or above
+5. Now try the under the table condition
+
+#### How to solve the problem under the table (Advanced)
+1. Find the table position from the XML
+2. Use the camera to get the table positions?
+3. Complex penalties?
