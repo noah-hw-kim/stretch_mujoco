@@ -33,7 +33,7 @@ class StretchReachEnv(gym.Env):
     SIM_TIME_EPS_S: float = 1e-9
 
     # Safety timeout so a stalled sim doesn't hang training forever (wall-clock seconds)
-    SIM_SYNC_TIMEOUT_S: float = 0.25
+    SIM_SYNC_TIMEOUT_S: float = 2.0
 
     # Small yield to avoid busy-waiting while polling sim time (wall-clock seconds)
     SIM_SYNC_POLL_SLEEP_S: float = 0.0005
@@ -60,7 +60,7 @@ class StretchReachEnv(gym.Env):
         dt: float = 0.05,
         max_steps: int = 50,
         success_thresh: float = 0.06,
-        scales: Tuple[float, float, float] = (0.003, 0.003, 0.01), # lift, arm, gripper
+        scales: Tuple[float, float, float] = (0.04, 0.06, 0.20),  # max speeds: lift m/s, arm m/s, gripper units/s
         limits: Optional[Dict[Actuators, Tuple[float, float]]] = None,
     ):
         super().__init__()
@@ -91,7 +91,7 @@ class StretchReachEnv(gym.Env):
         # Rolling window for stuck detection
         self._recent_d = deque(maxlen=int(self.STUCK_WINDOW))
         
-        # Action space: normalized [-1, 1]
+        # Action space: normalized [-1, 1] with (lift, arm, gripper)
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32)
         
         # Observation space:
@@ -181,19 +181,22 @@ class StretchReachEnv(gym.Env):
         """
         a = np.asarray(a, dtype=np.float32)
         a = np.clip(a, -1.0, 1.0)
-        delta = a * self.scales
         
-        # Safety: if step() called before reset()
+        # scales are max speeds (per second), so delta per step = speed * dt
+        delta = a * self.scales * self.dt
+        
+        # # Safety: if step() called before reset()
         if self._cmd_lift is None or self._cmd_arm is None or self._cmd_grip is None:
             s = self._get_status()
             self._cmd_lift = float(s.lift.pos)
             self._cmd_arm  = float(s.arm.pos)
             self._cmd_grip = float(s.gripper.pos)
-
+        
+        
         lift_low, lift_high = self.limits[Actuators.lift]
         arm_low, arm_high = self.limits[Actuators.arm]
         grip_low, grip_high = self.limits[Actuators.gripper]
-
+            
         # Integrate action into the COMMAND, not the measured state
         self._cmd_lift = float(np.clip(self._cmd_lift + float(delta[0]), lift_low, lift_high))
         self._cmd_arm  = float(np.clip(self._cmd_arm  + float(delta[1]), arm_low,  arm_high))
@@ -202,8 +205,65 @@ class StretchReachEnv(gym.Env):
         self.sim.move_to(Actuators.lift, self._cmd_lift)
         self.sim.move_to(Actuators.arm, self._cmd_arm)
         self.sim.move_to(Actuators.gripper, self._cmd_grip)
-    
-    
+        
+        # s = self._get_status()
+        # meas_lift = float(s.lift.pos)
+        # meas_arm  = float(s.arm.pos)
+        # meas_grip = float(s.gripper.pos)
+
+        # lift_low, lift_high = self.limits[Actuators.lift]
+        # arm_low,  arm_high  = self.limits[Actuators.arm]
+        # grip_low, grip_high = self.limits[Actuators.gripper]
+
+        # target_lift = float(np.clip(meas_lift + float(delta[0]), lift_low, lift_high))
+        # target_arm  = float(np.clip(meas_arm  + float(delta[1]), arm_low,  arm_high))
+        # target_grip = float(np.clip(meas_grip + float(delta[2]), grip_low, grip_high))
+
+        # self.sim.move_to(Actuators.lift, target_lift)
+        # self.sim.move_to(Actuators.arm,  target_arm)
+        # self.sim.move_to(Actuators.gripper, target_grip)
+
+        # # optional: log these as "cmd" for debugging only
+        # self._cmd_lift, self._cmd_arm, self._cmd_grip = target_lift, target_arm, target_grip
+        
+    # def _apply_action(self, a: np.ndarray) -> None:
+    #     """
+    #     Convert normalized action a in [-1,1]^3 into actuator target updates.
+    #     We do target = current + delta, then clip to actuator limits, then move_to.
+    #     """
+    #     a = np.asarray(a, dtype=np.float32)
+    #     a = np.clip(a, -1.0, 1.0)
+        
+    #     # scales are max speeds (per second), so delta per step = speed * dt
+    #     delta = a * self.scales * self.dt
+        
+    #     # # Safety: if step() called before reset()
+    #     # if self._cmd_lift is None or self._cmd_arm is None or self._cmd_grip is None:
+    #     #     s = self._get_status()
+    #     #     self._cmd_lift = float(s.lift.pos)
+    #     #     self._cmd_arm  = float(s.arm.pos)
+    #     #     self._cmd_grip = float(s.gripper.pos)
+        
+    #     # Optional: clip DELTA so a single step cannot overshoot joint limits too hard
+    #     # (Not required, but nice.)
+    #     s = self._get_status()
+    #     meas_lift = float(s.lift.pos)
+    #     meas_arm = float(s.arm.pos)
+    #     meas_grip = float(s.gripper.pos)
+        
+    #     lift_low, lift_high = self.limits[Actuators.lift]
+    #     arm_low, arm_high = self.limits[Actuators.arm]
+    #     grip_low, grip_high = self.limits[Actuators.gripper]
+        
+    #     target_lift = np.clip(meas_lift + float(delta[0]), lift_low, lift_high)
+    #     target_arm  = np.clip(meas_arm  + float(delta[1]), arm_low,  arm_high)
+    #     target_grip = np.clip(meas_grip + float(delta[2]), grip_low, grip_high)
+
+    #     self.sim.move_to(Actuators.lift, target_lift)
+    #     self.sim.move_to(Actuators.arm,  target_arm)
+    #     self.sim.move_to(Actuators.gripper, target_grip)
+        
+
     # ----------------------------
     # Gym API
     # ----------------------------
@@ -250,25 +310,36 @@ class StretchReachEnv(gym.Env):
         
          # --- Stuck / overhang penalty ---
         # When the arm is extended and the end-effector sits below the target height, it often means we’re “pushing under the counter overhang. If distance-to-goal hasn’t improved over the last N steps, apply a penalty to discourage repeatedly driving into the lip and encourage backing out / lifting / trying a different approach.
+        
         s = self._get_status()
+        
+        # Capture measured vs commanded so you can inspect it from the notebook
+        meas_lift = float(s.lift.pos)
+        meas_arm = float(s.arm.pos)
+        meas_grip = float(s.gripper.pos)
+
+        cmd_lift = float(self._cmd_lift) if self._cmd_lift is not None else np.nan
+        cmd_arm = float(self._cmd_arm) if self._cmd_arm is not None else np.nan
+        cmd_grip = float(self._cmd_grip) if self._cmd_grip is not None else np.nan
+        
         arm = float(s.arm.pos)
         ee_z = float(obs["achieved_goal"][2])
         goal_z = float(obs["desired_goal"][2])
 
-        self._recent_d.append(float(d))
+        # self._recent_d.append(float(d))
         
-        below_goal = ee_z < (goal_z - float(self.EE_BELOW_GOAL_MARGIN_M))
-        near_goal_safe = (d < (self.NEAR_GOAL_DISABLE_STUCK_MULT * self.success_thresh)) and (not below_goal)
+        # below_goal = ee_z < (goal_z - float(self.EE_BELOW_GOAL_MARGIN_M))
+        # near_goal_safe = (d < (self.NEAR_GOAL_DISABLE_STUCK_MULT * self.success_thresh)) and (not below_goal)
 
-        is_stuck = False
-        improvement = np.nan
+        # is_stuck = False
+        # improvement = np.nan
 
-        if (not near_goal_safe) and len(self._recent_d) == self._recent_d.maxlen:
-            improvement = float(self._recent_d[0] - self._recent_d[-1])  # >0 means progress
-            posture_gate = (arm > float(self.ARM_EXTENDED_THRESH)) and below_goal
-            if posture_gate and improvement < float(self.STUCK_MIN_IMPROVEMENT_M):
-                is_stuck = True
-                reward -= float(self.STUCK_PENALTY)
+        # if (not near_goal_safe) and len(self._recent_d) == self._recent_d.maxlen:
+        #     improvement = float(self._recent_d[0] - self._recent_d[-1])  # >0 means progress
+        #     posture_gate = (arm > float(self.ARM_EXTENDED_THRESH)) and below_goal
+        #     if posture_gate and improvement < float(self.STUCK_MIN_IMPROVEMENT_M):
+        #         is_stuck = True
+        #         reward -= float(self.STUCK_PENALTY)
 
         terminated = bool(success)
         truncated = bool(self._step_count >= self.max_steps)
@@ -276,13 +347,23 @@ class StretchReachEnv(gym.Env):
         info: Dict[str, Any] = {
             "is_success": float(success),
             "distance": float(d),
-            "is_stuck": bool(is_stuck),
-            "stuck_improvement": float(improvement) if np.isfinite(improvement) else np.nan,
             "arm_pos": float(arm),
             "ee_z": float(ee_z),
             "goal_z": float(goal_z),
-            "below_goal_height": bool(below_goal),
-            "near_goal_no_stuck_penalty": bool(near_goal_safe),
+            
+            # debug signals (print these in the notebook)
+            "cmd_lift": cmd_lift,
+            "cmd_arm": cmd_arm,
+            "cmd_grip": cmd_grip,
+            "meas_lift": meas_lift,
+            "meas_arm": meas_arm,
+            "meas_grip": meas_grip,
+            
+            # stuck improvement
+            # "is_stuck": bool(is_stuck),
+            # "stuck_improvement": float(improvement) if np.isfinite(improvement) else np.nan,
+            # "below_goal_height": bool(below_goal),
+            # "near_goal_no_stuck_penalty": bool(near_goal_safe),
         }
 
         # Keep your "terminal_observation" convention for logging correctness
