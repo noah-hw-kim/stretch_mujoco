@@ -23,6 +23,11 @@ class StretchReachEnv(gym.Env):
     # ----------------------------
     # Sync / timing constants
     # ----------------------------
+    BLOCKING_DEBUG: bool = False # True only when you want debugging
+    N_SUBSTEPS: int = 5 # how many internal sim ticks per env step
+    
+    
+    
     ENABLE_SIM_TIME_SYNC: bool = True
 
     # Require at least this fraction of dt worth of simulated time per env.step().
@@ -60,7 +65,7 @@ class StretchReachEnv(gym.Env):
         dt: float = 0.05,
         max_steps: int = 50,
         success_thresh: float = 0.06,
-        scales: Tuple[float, float, float] = (0.04, 0.06, 0.20),  # max speeds: lift m/s, arm m/s, gripper units/s
+        scales: Tuple[float, float, float] = (0.015, 0.06, 0.20),  # max speeds: lift m/s, arm m/s, gripper units/s
         limits: Optional[Dict[Actuators, Tuple[float, float]]] = None,
     ):
         super().__init__()
@@ -174,58 +179,8 @@ class StretchReachEnv(gym.Env):
         dg = obs["desired_goal"]
         return float(np.linalg.norm(ag - dg))
     
-    def _apply_action(self, a: np.ndarray) -> None:
-        """
-        Convert normalized action a in [-1,1]^3 into actuator target updates.
-        We do target = current + delta, then clip to actuator limits, then move_to.
-        """
-        a = np.asarray(a, dtype=np.float32)
-        a = np.clip(a, -1.0, 1.0)
-        
-        # scales are max speeds (per second), so delta per step = speed * dt
-        delta = a * self.scales * self.dt
-        
-        # # Safety: if step() called before reset()
-        if self._cmd_lift is None or self._cmd_arm is None or self._cmd_grip is None:
-            s = self._get_status()
-            self._cmd_lift = float(s.lift.pos)
-            self._cmd_arm  = float(s.arm.pos)
-            self._cmd_grip = float(s.gripper.pos)
-        
-        
-        lift_low, lift_high = self.limits[Actuators.lift]
-        arm_low, arm_high = self.limits[Actuators.arm]
-        grip_low, grip_high = self.limits[Actuators.gripper]
-            
-        # Integrate action into the COMMAND, not the measured state
-        self._cmd_lift = float(np.clip(self._cmd_lift + float(delta[0]), lift_low, lift_high))
-        self._cmd_arm  = float(np.clip(self._cmd_arm  + float(delta[1]), arm_low,  arm_high))
-        self._cmd_grip = float(np.clip(self._cmd_grip + float(delta[2]), grip_low, grip_high))
-
-        self.sim.move_to(Actuators.lift, self._cmd_lift)
-        self.sim.move_to(Actuators.arm, self._cmd_arm)
-        self.sim.move_to(Actuators.gripper, self._cmd_grip)
-        
-        # s = self._get_status()
-        # meas_lift = float(s.lift.pos)
-        # meas_arm  = float(s.arm.pos)
-        # meas_grip = float(s.gripper.pos)
-
-        # lift_low, lift_high = self.limits[Actuators.lift]
-        # arm_low,  arm_high  = self.limits[Actuators.arm]
-        # grip_low, grip_high = self.limits[Actuators.gripper]
-
-        # target_lift = float(np.clip(meas_lift + float(delta[0]), lift_low, lift_high))
-        # target_arm  = float(np.clip(meas_arm  + float(delta[1]), arm_low,  arm_high))
-        # target_grip = float(np.clip(meas_grip + float(delta[2]), grip_low, grip_high))
-
-        # self.sim.move_to(Actuators.lift, target_lift)
-        # self.sim.move_to(Actuators.arm,  target_arm)
-        # self.sim.move_to(Actuators.gripper, target_grip)
-
-        # # optional: log these as "cmd" for debugging only
-        # self._cmd_lift, self._cmd_arm, self._cmd_grip = target_lift, target_arm, target_grip
-        
+    
+    # # LIFT NOT SAGGING WITH SAVING PREVIOUS POSITION GLOBALLY
     # def _apply_action(self, a: np.ndarray) -> None:
     #     """
     #     Convert normalized action a in [-1,1]^3 into actuator target updates.
@@ -238,30 +193,88 @@ class StretchReachEnv(gym.Env):
     #     delta = a * self.scales * self.dt
         
     #     # # Safety: if step() called before reset()
-    #     # if self._cmd_lift is None or self._cmd_arm is None or self._cmd_grip is None:
-    #     #     s = self._get_status()
-    #     #     self._cmd_lift = float(s.lift.pos)
-    #     #     self._cmd_arm  = float(s.arm.pos)
-    #     #     self._cmd_grip = float(s.gripper.pos)
-        
-    #     # Optional: clip DELTA so a single step cannot overshoot joint limits too hard
-    #     # (Not required, but nice.)
-    #     s = self._get_status()
-    #     meas_lift = float(s.lift.pos)
-    #     meas_arm = float(s.arm.pos)
-    #     meas_grip = float(s.gripper.pos)
+    #     if self._cmd_lift is None or self._cmd_arm is None or self._cmd_grip is None:
+    #         s = self._get_status()
+    #         self._cmd_lift = float(s.lift.pos)
+    #         self._cmd_arm  = float(s.arm.pos)
+    #         self._cmd_grip = float(s.gripper.pos)
         
     #     lift_low, lift_high = self.limits[Actuators.lift]
     #     arm_low, arm_high = self.limits[Actuators.arm]
     #     grip_low, grip_high = self.limits[Actuators.gripper]
-        
-    #     target_lift = np.clip(meas_lift + float(delta[0]), lift_low, lift_high)
-    #     target_arm  = np.clip(meas_arm  + float(delta[1]), arm_low,  arm_high)
-    #     target_grip = np.clip(meas_grip + float(delta[2]), grip_low, grip_high)
+            
+    #     # Integrate action into the COMMAND, not the measured state
+    #     self._cmd_lift = float(np.clip(self._cmd_lift + float(delta[0]), lift_low, lift_high))
+    #     self._cmd_arm  = float(np.clip(self._cmd_arm  + float(delta[1]), arm_low,  arm_high))
+    #     self._cmd_grip = float(np.clip(self._cmd_grip + float(delta[2]), grip_low, grip_high))
 
-    #     self.sim.move_to(Actuators.lift, target_lift)
-    #     self.sim.move_to(Actuators.arm,  target_arm)
-    #     self.sim.move_to(Actuators.gripper, target_grip)
+    #     # self.sim.move_to(Actuators.lift, self._cmd_lift)
+    #     # self.sim.move_to(Actuators.arm, self._cmd_arm)
+    #     # self.sim.move_to(Actuators.gripper, self._cmd_grip)
+        
+    #     # send commands (fiter very small changes)
+    #     if abs(a[0]) > 1e-6:
+    #         self.sim.move_to(Actuators.lift, self._cmd_lift)
+    #     if abs(a[1]) > 1e-6:
+    #         self.sim.move_to(Actuators.arm, self._cmd_arm)
+    #     if abs(a[2]) > 1e-6:
+    #         self.sim.move_to(Actuators.gripper, self._cmd_grip)
+        
+    #     # iteration 10x
+    #     # 1 ->  0.05 + 0.1 = 0.15
+    #     # 2 -> 0.06 + 0.1 = 0.16
+    #     # 10 -> 0.05 + 0.1 = 1.05
+        
+    #     # it's better to read the current sensor than having the virtual point
+    #     # worry about later the virtual point gap can't prevent the
+    #     # move_by could be more accurate
+    #     # test with gripper as well (1,1,1)
+        
+    #     # Lift
+    #     # Going up is not accurate with move_by and wait_move because of the gravity? (error of 40% of 0.05 scale)
+    #     # Going down is accurate (6% of 0.05 scale)
+        
+    #     # test small vector
+        
+    #     # wait_moving -> leave for now how long it takes for the rl -> with headless. 
+        
+    # LIFT SAGGING WITH USING MEASURED POSITION (USE MOVE BY)
+    def _apply_action(self, a: np.ndarray) -> None:
+        """
+        Convert normalized action a in [-1,1]^3 into actuator target updates.
+        We do target = current + delta, then clip to actuator limits, then move_to.
+        """
+        a = np.asarray(a, dtype=np.float32)
+        a = np.clip(a, -1.0, 1.0)
+        
+        # scales are max speeds (per second), so delta per step = speed * dt
+        delta = a * self.scales * self.dt
+        moved = [False, False, False]
+        
+        print("current delta =", delta)
+        
+        if abs(float(delta[0])) > 1e-4:
+            print("=====LIFT======")
+            print("moving lift by", delta[0])
+            self.sim.move_by(Actuators.lift, float(delta[0]))
+            # self.sim.wait_while_is_moving(Actuators.lift)
+            moved[0] = True
+        
+        if abs(float(delta[1])) > 1e-4:
+            print("=====ARM======")
+            print("moving arm by", delta[1])
+            self.sim.move_by(Actuators.arm,  float(delta[1]))
+            # self.sim.wait_while_is_moving(Actuators.arm)
+            moved[1] = True
+        
+        if abs(float(delta[2])) > 1e-4:
+            print("=====GRIPPER======")
+            print("moving gripper by", delta[2])
+            self.sim.move_by(Actuators.gripper, float(delta[2]))
+            # self.sim.wait_while_is_moving(Actuators.gripper)
+            moved[2] = True
+            
+        return moved, delta
         
 
     # ----------------------------
@@ -296,20 +309,40 @@ class StretchReachEnv(gym.Env):
     def step(self, action):
         self._step_count += 1
         
-        t0 = float(self.sim.pull_status().time)
-        # Apply action and wait one control tick
-        self._apply_action(action)
-        # time.sleep(self.dt)
-        self._wait_for_sim_advance(t0)
+        # t0 = float(self.sim.pull_status().time)
+        # # Apply action and wait one control tick
+        moved, delta = self._apply_action(action)
+        # # self._wait_for_sim_advance(t0)
+        
+        # # advance multiple control ticks per env.step
+        # n_substeps = 5
+        # for _ in range(n_substeps):
+        #     self._wait_for_sim_advance(t0)
+        #     t0 = float(self.sim.pull_status().time)
+        
+        if self.BLOCKING_DEBUG:
+            # # optional: wait only if you really want "almost reaches target each step"
+            if moved[0]:
+                self.sim.wait_while_is_moving(Actuators.lift)
+            if moved[1]:
+                self.sim.wait_while_is_moving(Actuators.arm)
+            if moved[2]:
+                self.sim.wait_while_is_moving(Actuators.gripper)
+        else:
+            # RL mode: DO NOT BLOCK. Advance a fixed amount of sim time.
+            # This part depends on how your sim advances time.
+            # If you have a MuJoCo step method, do something like:
+            t0 = float(self.sim.pull_status().time)
+            for _ in range(self.N_SUBSTEPS):
+                self._wait_for_sim_advance(t0)
+                t0 = float(self.sim.pull_status().time)
+        
 
         obs = self._get_obs()
         d = self._compute_distance(obs)
 
         reward = -d
         success = d < self.success_thresh
-        
-         # --- Stuck / overhang penalty ---
-        # When the arm is extended and the end-effector sits below the target height, it often means we’re “pushing under the counter overhang. If distance-to-goal hasn’t improved over the last N steps, apply a penalty to discourage repeatedly driving into the lip and encourage backing out / lifting / trying a different approach.
         
         s = self._get_status()
         
@@ -325,7 +358,8 @@ class StretchReachEnv(gym.Env):
         arm = float(s.arm.pos)
         ee_z = float(obs["achieved_goal"][2])
         goal_z = float(obs["desired_goal"][2])
-
+        
+        # THIS PART IS FOR AVOIDING THE OBSTACLE (TABLE TOP PLATE)
         # self._recent_d.append(float(d))
         
         # below_goal = ee_z < (goal_z - float(self.EE_BELOW_GOAL_MARGIN_M))
@@ -359,7 +393,7 @@ class StretchReachEnv(gym.Env):
             "meas_arm": meas_arm,
             "meas_grip": meas_grip,
             
-            # stuck improvement
+            # THIS PART IS FOR AVOIDING THE OBSTACLE (TABLE TOP PLATE)
             # "is_stuck": bool(is_stuck),
             # "stuck_improvement": float(improvement) if np.isfinite(improvement) else np.nan,
             # "below_goal_height": bool(below_goal),
