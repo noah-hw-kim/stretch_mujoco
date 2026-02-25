@@ -132,6 +132,7 @@ def model_generation_wizard(
     style: int = None,
     write_to_file: str = None,
     robot_spawn_pose: dict = None,
+    
 ) -> Tuple[mujoco.MjModel, str, dict]:
     """
     Wizard/API to generate a kitchen model for a given task, layout, and style.
@@ -287,17 +288,17 @@ def model_generation_wizard(
         #     "quat": object_placements[obj_name][1],
         # }
         
-        # === MANUALLY UPDATED TO SET APPLE OBJECT POS FIXED
+        # === 10/26/2025 MANUALLY UPDATED TO SET APPLE OBJECT POS FIXED ===
         xml = xml_modify_body_pos(
             xml,
             "body",
             obj_name + "_main",  # Object name ref in the xml
-            pos=np.array([0.7, -0.6, object_placements[obj_name][0][2]]),
+            pos=np.array([0.9, -0.3, object_placements[obj_name][0][2]]),
             quat=object_placements[obj_name][1],
         )
         object_placements_info[obj_name + "_main"] = {
             "cat": category,
-            "pos": np.array([0.7, -0.6, object_placements[obj_name][0][2]]),
+            "pos": np.array([0.9, -0.3, object_placements[obj_name][0][2]]),
             "quat": object_placements[obj_name][1],
         }
         # === END ===

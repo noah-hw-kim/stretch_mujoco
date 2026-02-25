@@ -43,6 +43,8 @@ class MujocoServerProxies:
     _objects_state: "DictProxy[str, dict]"           # {"val": {name: ((x,y,z),(qx,qy,qz,qw))}}
     _sim_time: "DictProxy[str, float]"               # {"val": float}
     _tracked_names: "list"                           # manager.list() of names
+    # in MujocoServerProxies dataclass - Added (2/24/2026)to reset the object
+    _object_pose_cmd: "DictProxy[str, dict]"  # {"val": {"name": str, "pos": (x,y,z), "quat": (w,x,y,z), "trigger": bool}}
     # ===== END =====
 
     def __setattr__(self, name: str, value) -> None:
@@ -110,6 +112,27 @@ class MujocoServerProxies:
             return self._sim_time["val"], dict(self._objects_state["val"])
         except BrokenPipeError:
             return 0.0, {}
+        
+    
+    # Added (2/24/2026)to reset the object
+    def request_object_pose(self, name: str, pos, quat_wxyz) -> None:
+        try:
+            self._object_pose_cmd["val"] = {
+                "trigger": True,
+                "name": name,
+                "pos": tuple(float(x) for x in pos),
+                "quat": tuple(float(x) for x in quat_wxyz),
+            }
+        except BrokenPipeError:
+            ...
+            
+    # Added (2/24/2026)to reset the object
+    def pull_object_pose_request(self) -> dict:
+        try:
+            return dict(self._object_pose_cmd["val"])
+        except BrokenPipeError:
+            return {"trigger": False}
+    
     # ===== END =====
 
     @staticmethod
@@ -125,6 +148,8 @@ class MujocoServerProxies:
             _objects_state=manager.dict({"val": {}}),
             _sim_time=manager.dict({"val": 0.0}),
             _tracked_names=manager.list(),
+            # Added (2/24/2026)to teleport the object
+            _object_pose_cmd=manager.dict({"val": {"trigger": False}}),
             # ===== END =====
         )
 
@@ -455,6 +480,54 @@ class MujocoServer:
 
         physics_thread.join()
         self.close()
+        
+    
+    # ===== new (2/24/2026), Added (2/24/2026)to reset the object =====
+    def _apply_object_pose_requests(self):
+        req = self.data_proxies.pull_object_pose_request()
+        if not req.get("trigger", False):
+            return
+
+        name = req["name"]          # this should be the body name you track, like "apple0_main"
+        pos = req["pos"]            # (x,y,z)
+        quat = req["quat"]          # (w,x,y,z)
+
+        # clear trigger immediately so it applies once
+        self.data_proxies._object_pose_cmd["val"] = {"trigger": False}
+
+        # Find the body's joint. Most free objects have a free joint named something like "<body>_joint" or similar.
+        # The safe way: get body id then get its joint address via body_jntadr/body_jntnum.
+        try:
+            bid = mujoco.mj_name2id(self.mjmodel, mujoco.mjtObj.mjOBJ_BODY, name)
+        except Exception:
+            return
+
+        jadr = int(self.mjmodel.body_jntadr[bid])
+        jnum = int(self.mjmodel.body_jntnum[bid])
+        if jnum <= 0:
+            # body has no joint, cannot teleport via qpos
+            return
+
+        jid = jadr  # first joint of body
+        jtype = int(self.mjmodel.jnt_type[jid])
+        if jtype != mujoco.mjtJoint.mjJNT_FREE:
+            # not a free joint, you may need a different method
+            return
+
+        qpos_adr = int(self.mjmodel.jnt_qposadr[jid])
+        dof_adr = int(self.mjmodel.jnt_dofadr[jid])
+
+        # free joint qpos: [x y z qw qx qy qz]
+        self.mjdata.qpos[qpos_adr:qpos_adr+3] = np.array(pos, dtype=float)
+        self.mjdata.qpos[qpos_adr+3:qpos_adr+7] = np.array(quat, dtype=float)
+
+        # zero velocity: 6 dof
+        self.mjdata.qvel[dof_adr:dof_adr+6] = 0.0
+
+        mujoco.mj_forward(self.mjmodel, self.mjdata)
+    # === END ===
+    
+    
 
     def _ctrl_callback(self, model: MjModel, data: MjData) -> None:
         """
@@ -472,6 +545,8 @@ class MujocoServer:
         
         # ===== new (11/2/2025) =====
         self._publish_objects_state()
+        # Added (2/24/2026)to reset the object
+        self._apply_object_pose_requests()   # ADD THIS LINE
         # ===== END =====
         
         self.push_command(self.data_proxies.get_command())

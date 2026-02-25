@@ -577,6 +577,11 @@ class StretchMujocoSimulator:
             for k, v in mapping.items()
         }
     
+    
+    # ===== new (2/24/2026), Added (2/24/2026)to reset the object =====
+    def set_object_pose(self, body_name: str, pos_xyz, quat_wxyz=(1,0,0,0)):
+        self.data_proxies.request_object_pose(body_name, pos_xyz, quat_wxyz)
+    
     """
     ========== END ==========
     """
