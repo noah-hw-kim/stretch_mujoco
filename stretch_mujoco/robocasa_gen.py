@@ -293,12 +293,12 @@ def model_generation_wizard(
             xml,
             "body",
             obj_name + "_main",  # Object name ref in the xml
-            pos=np.array([0.9, -0.3, object_placements[obj_name][0][2]]),
+            pos=np.array([0.9, -0.5, object_placements[obj_name][0][2]]),
             quat=object_placements[obj_name][1],
         )
         object_placements_info[obj_name + "_main"] = {
             "cat": category,
-            "pos": np.array([0.9, -0.3, object_placements[obj_name][0][2]]),
+            "pos": np.array([0.9, -0.5, object_placements[obj_name][0][2]]),
             "quat": object_placements[obj_name][1],
         }
         # === END ===

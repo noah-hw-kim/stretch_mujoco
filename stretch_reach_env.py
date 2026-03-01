@@ -91,6 +91,7 @@ class StretchReachEnv(gym.Env):
         
         wait_motion = True,
         control_hold = 3,
+        
     ):
         super().__init__()
         self.sim = sim
@@ -561,13 +562,31 @@ class StretchReachEnv(gym.Env):
 
         # Put robot in a known starting pose (simple neutral)
         # These are safe-ish defaults, tweak as needed.
-        self.sim.home()
         
-        self.sim.set_object_pose(self.obj_name, pos_xyz=(0.9, -0.4, 0.98), quat_wxyz=(1,0,0,0))
-        
-        # Move above the table for now
+        # 1) go to a safe lift height first (clear the table)
         self.sim.move_to(Actuators.lift, 1.0)
-        time.sleep(1)
+        self.sim.wait_while_is_moving(Actuators.lift)
+
+        # 2) retract arm fully
+        self.sim.move_to(Actuators.arm, 0.1)
+        self._wait_sim_dt()
+        
+        self.sim.move_to(Actuators.gripper, -0.064)  # pick a neutral open value for your sim
+        self._wait_sim_dt()
+
+        # self.sim.home()
+        # self._wait_sim_dt()
+        # # self._wait_sim_dt()  # home often takes more than one tick
+        
+        # # Move above the table for now
+        # self.sim.move_to(Actuators.lift, 1.0)
+        # self._wait_sim_dt()
+        
+        # table z = around 0.963 so we need to place it a bit above like 0.01 - 0.02
+        y_axis = np.random(-0.6, -0.3)
+        
+        self.sim.set_object_pose(self.obj_name, pos_xyz=(0.9, -0.5, 0.983), quat_wxyz=(1,0,0,0))
+        self._wait_sim_dt()
 
         # Let it settle a bit (OK in reset)
         # time.sleep(0.3)
