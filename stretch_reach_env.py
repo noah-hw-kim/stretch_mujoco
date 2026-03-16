@@ -40,9 +40,33 @@ class StretchReachEnv(gym.Env):
     # Penalty to prevent the arm stays only in extended pos
     # ----------------------------
     ARM_NEAR_MAX_THRESH = 0.01   # meters from max (1 cm). Try 0.01–0.03
-    ARM_NEAR_MAX_PENALTY = 0.2   # flat penalty. Try 0.1–0.5
+    ARM_NEAR_MAX_PENALTY = 0.01   # flat penalty. Try 0.1–0.5. 3/1 - from 0.2 to 0.01
 
+    # Symmetric guard near the minimum arm extension (retracted).
+    # Penalize when the policy keeps trying to retract while already near the min.
+    ARM_NEAR_MIN_THRESH = 0.01   # meters above min (1 cm). E.g., min=0.0 -> threshold at 0.01
+    ARM_NEAR_MIN_PENALTY = 0.01  # flat penalty (keep similar scale to ARM_NEAR_MAX_PENALTY)
+
+    # Optional: end the episode when repeatedly "banging" into arm limits.
+    # We mark this as `truncated` (external cutoff) and apply an extra penalty.
+    TRUNCATE_ON_ARM_LIMIT: bool = False
+    ARM_LIMIT_TRUNCATION_PENALTY: float = 0.0
+
+    # Action regularization (discourages thrashing). Implemented on the *applied* deltas,
+    # since the current continuous mapping uses sign-steps (raw action magnitude is not meaningful).
+    ACTION_PENALTY_WEIGHT = 0.01
+
+    # Reward shaping: add a small distance term on top of progress shaping.
+    # Total shaping ~= (prev_d - d) - (DISTANCE_SHAPING_WEIGHT * d)
+    # Increase this if the policy "gives up" near the goal due to low per-step progress.
+    DISTANCE_SHAPING_WEIGHT = 0.1
     
+    ACTION_NAME_ALL = {
+        0: "lift_down", 1: "lift_up", 2: "noop",
+        3: "arm_in", 4: "arm_out",
+        5: "grip_close", 6: "grip_open",
+    }
+
     # ENABLE_SIM_TIME_SYNC: bool = True
 
     # # Require at least this fraction of dt worth of simulated time per env.step().
@@ -78,7 +102,7 @@ class StretchReachEnv(gym.Env):
         sim,
         obj_name: str = "apple0_main",
         dt: float = 0.05,
-        max_steps: int = 100,
+        max_steps: int = 200,
         success_thresh: float = 0.06,
         
         scales: Tuple[float, float, float] = (0.8, 0.3, 0.5),  # max speeds: lift m/s, arm m/s, gripper units/s
@@ -92,6 +116,9 @@ class StretchReachEnv(gym.Env):
         wait_motion = True,
         control_hold = 3,
         
+        default_mode: str = "easy",
+        fixed_y: float = -0.5,
+        hard_y_range: Tuple[float, float] = (-0.6, -0.4),
     ):
         super().__init__()
         self.sim = sim
@@ -105,6 +132,16 @@ class StretchReachEnv(gym.Env):
         self.action_mode = action_mode
         self.wait_motion = wait_motion
         self.control_hold = control_hold
+        self.default_mode = str(default_mode)
+        self.fixed_y = float(fixed_y)
+        self.hard_y_range = (float(hard_y_range[0]), float(hard_y_range[1]))
+        self.prev_d = None
+        self._closed = False
+        
+        if self.default_mode not in {"easy", "hard"}:
+            raise ValueError("default_mode must be 'easy' or 'hard'")
+        if not (self.hard_y_range[0] < self.hard_y_range[1]):
+            raise ValueError("hard_y_range must satisfy low < high")
         
         # Empirical limits measured (safe defaults)
         if limits is None:
@@ -135,7 +172,7 @@ class StretchReachEnv(gym.Env):
         if action_mode == "discrete":
             # discrete version
             if self.allowed_parts == "lift":
-                self.action_space = spaces.Discrete(3)      # down, noop, up
+                self.action_space = spaces.Discrete(3)      # down, up, noop
             elif self.allowed_parts == "lift_arm":
                 self.action_space = spaces.Discrete(5)      # lift down/up/noop + arm in/out
             else:  # "all"
@@ -150,14 +187,32 @@ class StretchReachEnv(gym.Env):
         
         
         # Observation space:
-        # observation = [lift, arm, gripper, ee_x, ee_y, ee_z, obj_x, obj_y, oPbj_z] -> 9 dims
+        # observation = [lift, arm, gripper, ee_x, ee_y, ee_z, obj_x, obj_y, oPb_z, rel_x, rel_y, rel_z, lift_vel, arm_vel, gripper_vel] -> 15 dims
         self.observation_space = spaces.Dict(
             {
-                "observation": spaces.Box(low=-np.inf, high=np.inf, shape=(9,), dtype=np.float32),
+                "observation": spaces.Box(low=-np.inf, high=np.inf, shape=(15,), dtype=np.float32),
                 "achieved_goal": spaces.Box(low=-np.inf, high=np.inf, shape=(3,), dtype=np.float32),
                 "desired_goal": spaces.Box(low=-np.inf, high=np.inf, shape=(3,), dtype=np.float32),
             }
         )
+
+    def close(self):
+        """Close the environment and stop the simulator process.
+
+        Stable-Baselines3 (and Gymnasium wrappers like DummyVecEnv/Monitor) will call
+        `env.close()` when you call `vec_env.close()`. This makes sure we don't leak
+        Mujoco server processes when creating many envs during experimentation.
+        """
+        if getattr(self, "_closed", False):
+            return
+
+        self._closed = True
+        try:
+            if getattr(self, "sim", None) is not None:
+                self.sim.stop()
+        except Exception:
+            # Best-effort shutdown; avoid raising from close().
+            pass
         
     # ----------------------------
     # Helpers
@@ -208,20 +263,31 @@ class StretchReachEnv(gym.Env):
         s = self._get_status()
         ee = self._get_ee_pos()
         obj = self._get_obj_pos()
+        
+        # 1. Relative Vector (Fetch: object_rel_pos)
+        rel_pos = obj - ee
 
+        # 2. Joint Positions
         lift = float(s.lift.pos)
         arm = float(s.arm.pos)
         grip = float(s.gripper.pos)
+        
+        # 3. Joint Velocities (Passively changes the EE position)
+        joint_vel = np.array([s.lift.vel, s.arm.vel, s.gripper.vel], dtype=np.float32)
 
-        obs_vec = np.array([lift, arm, grip, ee[0], ee[1], ee[2], obj[0], obj[1], obj[2]], dtype=np.float32)
-
-        achieved_goal = ee
-        desired_goal = obj
+        # 15 dims: [joints(3), ee(3), obj(3), rel(3), joint_vel(3)]
+        obs_vec = np.concatenate([
+            [lift, arm, grip], 
+            ee, 
+            obj, 
+            rel_pos,
+            joint_vel
+        ]).astype(np.float32)
 
         return {
             "observation": obs_vec,
-            "achieved_goal": achieved_goal,
-            "desired_goal": desired_goal,
+            "achieved_goal": ee,
+            "desired_goal": obj,
         }
 
     def _compute_distance(self, obs: Dict[str, np.ndarray]) -> float:
@@ -410,8 +476,8 @@ class StretchReachEnv(gym.Env):
 
         mode="lift" (3):
         0: lift down
-        1: no-op
-        2: lift up
+        1: lift up
+        2: no-op
 
         mode="lift_arm" (5):
         0: lift down
@@ -466,10 +532,10 @@ class StretchReachEnv(gym.Env):
 
         # Map action -> delta (mode-specific)
         if self.allowed_parts == "lift":
-            # 0 down, 1 noop, 2 up
+            # 0 down, 1 up, 2 noop
             if a == 0:
                 delta_lift = -lift_dn
-            elif a == 2:
+            elif a == 1:
                 delta_lift = +lift_up
 
         elif self.allowed_parts == "lift_arm":
@@ -536,12 +602,12 @@ class StretchReachEnv(gym.Env):
         # check attempted to move or not
         attempted = {"lift": False, "arm": False, "grip": False}
         if self.allowed_parts == "lift":
-            if a in (0, 2): attempted["lift"] = True
+            if a in (0, 1): attempted["lift"] = True
         elif self.allowed_parts == "lift_arm":
-            if a in (0, 2): attempted["lift"] = True
+            if a in (0, 1): attempted["lift"] = True
             if a in (3, 4): attempted["arm"] = True
         else:  # all
-            if a in (0, 2): attempted["lift"] = True
+            if a in (0, 1): attempted["lift"] = True
             if a in (3, 4): attempted["arm"] = True
             if a in (5, 6): attempted["grip"] = True
 
@@ -563,16 +629,16 @@ class StretchReachEnv(gym.Env):
         # Put robot in a known starting pose (simple neutral)
         # These are safe-ish defaults, tweak as needed.
         
-        # 1) go to a safe lift height first (clear the table)
-        self.sim.move_to(Actuators.lift, 1.0)
-        self.sim.wait_while_is_moving(Actuators.lift)
-
-        # 2) retract arm fully
         self.sim.move_to(Actuators.arm, 0.1)
-        self._wait_sim_dt()
+        self.sim.wait_while_is_moving(Actuators.arm)
+        # self._wait_sim_dt()
+        
+        self.sim.move_to(Actuators.lift, 1.1)
+        self.sim.wait_while_is_moving(Actuators.lift)
         
         self.sim.move_to(Actuators.gripper, -0.064)  # pick a neutral open value for your sim
-        self._wait_sim_dt()
+        self.sim.wait_while_is_moving(Actuators.gripper)
+        # self._wait_sim_dt()
 
         # self.sim.home()
         # self._wait_sim_dt()
@@ -583,20 +649,34 @@ class StretchReachEnv(gym.Env):
         # self._wait_sim_dt()
         
         # table z = around 0.963 so we need to place it a bit above like 0.01 - 0.02
-        y_axis = np.random(-0.6, -0.3)
-        
-        self.sim.set_object_pose(self.obj_name, pos_xyz=(0.9, -0.5, 0.983), quat_wxyz=(1,0,0,0))
+        mode = self.default_mode
+        if options is not None and "mode" in options:
+            mode = str(options["mode"])
+        if mode not in {"easy", "hard"}:
+            raise ValueError("reset options['mode'] must be 'easy' or 'hard'")
+
+        if mode == "easy":
+            y = self.fixed_y
+        else:
+            y = float(self.np_random.uniform(self.hard_y_range[0], self.hard_y_range[1]))
+
+        self.sim.set_object_pose(self.obj_name, pos_xyz=(0.9, y, 0.983), quat_wxyz=(1, 0, 0, 0))
         self._wait_sim_dt()
 
         # Let it settle a bit (OK in reset)
         # time.sleep(0.3)
 
         obs = self._get_obs()
-        info: Dict[str, Any] = {}
+        self.prev_d = self._compute_distance(obs)
+        
+        info = {"mode": mode, "target_y": float(y)}
+        
         return obs, info
 
     def step(self, action):
         self._step_count += 1
+        # Capture state BEFORE applying the action so penalties reflect the *attempt*.
+        s_before = self._get_status()
         
         # # Apply action and wait one control tick
         
@@ -626,54 +706,129 @@ class StretchReachEnv(gym.Env):
         #         self._wait_for_sim_advance(t0)
         #         t0 = float(self.sim.pull_status().time)
         
-
         obs = self._get_obs()
         d = self._compute_distance(obs)
-
-        reward = -d
-        
-        # Flat penalty: if arm is near max and action is "extend", punish
-        if isinstance(action, (np.ndarray, list, tuple)):
-            a = int(np.asarray(action).reshape(-1)[0])
-        else:
-            a = int(action)
-
-        # only relevant if your action space includes arm extend
-        if self.allowed_parts in ("lift_arm", "all") and a == 4:
-            arm_pos = float(self._get_status().arm.pos)
-            arm_max = float(self.limits[Actuators.arm][1])
-            if arm_pos > (arm_max - self.ARM_NEAR_MAX_THRESH):
-                reward -= self.ARM_NEAR_MAX_PENALTY
-        
         success = d < self.success_thresh
         
+        a = None
+        if self.action_mode == "discrete":
+            # SB3/DummyVecEnv sometimes passes array([action]) instead of int
+            if isinstance(action, (np.ndarray, list, tuple)):
+                a = int(np.asarray(action).reshape(-1)[0])
+            else:
+                a = int(action)
+                
         s = self._get_status()
+                
+        # # Default values for logging/logic variables that were commented out
+        # arm_limit_penalty = 0.0
+        # arm_retract_penalty = 0.0
+        # success_bonus = 20.0 if success else 0.0
+        # arm_limit_truncated = False # Since the truncation logic is currently off
         
-        # # Capture measured vs commanded so you can inspect it from the notebook
-        # meas_lift = float(s.lift.pos)
-        # meas_arm = float(s.arm.pos)
-        # meas_grip = float(s.gripper.pos)
+        # # Ensure attempted exists for info dict
+        # if self.action_mode == "continuous":
+        #     attempted = {"lift": False, "arm": False, "grip": False}
         
-        # arm = float(s.arm.pos)
+        # # --- REWARD PART ---
+        # reward = 0.0
+        # reward -= float(d)
+        # arm_min = float(self.limits[Actuators.arm][0])
+        # arm_max = float(self.limits[Actuators.arm][1])
+        # arm_pos_before = float(s_before.arm.pos)
+
+        # arm_at_limit = arm_pos_before > (arm_max - self.ARM_NEAR_MAX_THRESH)
+        # arm_at_min_limit = arm_pos_before < (arm_min + self.ARM_NEAR_MIN_THRESH)
+
+        # arm_limit_penalty = 0.0
+        # arm_retract_penalty = 0.0
+        # arm_limit_truncated = False
+        
+        # # Detect "attempt" direction (discrete or continuous)
+        # attempted_extend = False
+        # attempted_retract = False
+        # if self.allowed_parts in ("lift_arm", "all"):
+        #     if self.action_mode == "discrete" and a is not None:
+        #         attempted_retract = (a == 3)
+        #         attempted_extend = (a == 4)
+        #     # elif self.action_mode == "continuous":
+        #     #     a_vec = np.asarray(action, dtype=np.float32).reshape(-1)
+        #     #     # arm is index 1 for both lift_arm(2) and all(3)
+        #     #     if a_vec.size >= 2:
+        #     #         attempted_extend = float(a_vec[1]) > 0.0
+        #     #         attempted_retract = float(a_vec[1]) < 0.0
+
+        # if self.allowed_parts in ("lift_arm", "all"):
+        #     if attempted_extend and arm_at_limit:
+        #         arm_limit_penalty = float(self.ARM_NEAR_MAX_PENALTY)
+        #         reward -= arm_limit_penalty
+
+        #     if attempted_retract and arm_at_min_limit:
+        #         arm_retract_penalty = float(self.ARM_NEAR_MIN_PENALTY)
+        #         reward -= arm_retract_penalty
+
+        #     # Optional truncation to prevent endless "extend/retract at limit" behavior.
+        #     if bool(getattr(self, "TRUNCATE_ON_ARM_LIMIT", False)):
+        #         if (attempted_extend and arm_at_limit) or (attempted_retract and arm_at_min_limit):
+        #             arm_limit_truncated = True
+        #             reward -= float(getattr(self, "ARM_LIMIT_TRUNCATION_PENALTY", 0.0))
+        
+        # success_bonus = 0.0
+        # if success:
+        #     success_bonus = 10.0
+        #     reward += success_bonus
+        
+        # --- REWARD REDESIGN ---
+        reward = 0.0
+        
+        # --- Helper: current joint state (already computed above as `s`) ---
+        arm_pos  = float(s.arm.pos)
+        arm_min  = float(self.limits[Actuators.arm][0])
+        arm_max  = float(self.limits[Actuators.arm][1])
+        lift_pos = float(s.lift.pos)
+        lift_min = float(self.limits[Actuators.lift][0])
+        lift_max = float(self.limits[Actuators.lift][1])
+        
+        # 1. Time penalty — small, just enough to discourage idling
+        reward -= 0.02
+        
+        # 2. Potential-based progress — CLIPPED symmetrically.
+        #    Clip prevents a single-step overshoot from wiping out all learning.
+        #    Scale is reduced so progress and proximity bonuses are balanced.
+        if self.prev_d is not None:
+            progress = self.prev_d - d
+            reward += float(np.clip(progress, -0.05, 0.05)) * 10.0
+        
+        
+        # 3. Success Bonus
+        if success:
+            reward += 100.0
+        
+        # 4. No-op / useless action penalty (replaces the commented-out limit penalties).
+        #    Only penalize when the action truly does nothing at the boundary.
+        if self.action_mode == "discrete" and a is not None:
+            # arm_in (a==3) while already at or near the retracted limit
+            if a == 3 and arm_pos < arm_min + 0.012:
+                reward -= 0.08
+            # arm_out (a==4) while already at or near the extended limit
+            if a == 4 and arm_pos > arm_max - 0.012:
+                reward -= 0.08
+            # lift_down (a==0) while already near the bottom
+            if a == 0 and lift_pos < lift_min + 0.05:
+                reward -= 0.05
+            # lift_up (a==1) while already near the top (discourages resetting to safe height)
+            if a == 1 and lift_pos > lift_max - 0.05:
+                reward -= 0.05
+                
+        self.prev_d = d
+            
+
+        # --- REWARD PART END ---
+        
+        action_name = self.ACTION_NAME_ALL.get(a, str(a)) if a is not None else "continuous"
         
         ee_z = float(obs["achieved_goal"][2])
         goal_z = float(obs["desired_goal"][2])
-        
-        # THIS PART IS FOR AVOIDING THE OBSTACLE (TABLE TOP PLATE)
-        # self._recent_d.append(float(d))
-        
-        # below_goal = ee_z < (goal_z - float(self.EE_BELOW_GOAL_MARGIN_M))
-        # near_goal_safe = (d < (self.NEAR_GOAL_DISABLE_STUCK_MULT * self.success_thresh)) and (not below_goal)
-
-        # is_stuck = False
-        # improvement = np.nan
-
-        # if (not near_goal_safe) and len(self._recent_d) == self._recent_d.maxlen:
-        #     improvement = float(self._recent_d[0] - self._recent_d[-1])  # >0 means progress
-        #     posture_gate = (arm > float(self.ARM_EXTENDED_THRESH)) and below_goal
-        #     if posture_gate and improvement < float(self.STUCK_MIN_IMPROVEMENT_M):
-        #         is_stuck = True
-        #         reward -= float(self.STUCK_PENALTY)
 
         terminated = bool(success)
         truncated = bool(self._step_count >= self.max_steps)
@@ -701,11 +856,24 @@ class StretchReachEnv(gym.Env):
             "delta_arm": float(delta[1]),
             "delta_grip": float(delta[2]),
             
-            # THIS PART IS FOR AVOIDING THE OBSTACLE (TABLE TOP PLATE)
-            # "is_stuck": bool(is_stuck),
-            # "stuck_improvement": float(improvement) if np.isfinite(improvement) else np.nan,
-            # "below_goal_height": bool(below_goal),
-            # "near_goal_no_stuck_penalty": bool(near_goal_safe),
+            # "arm_limit_penalty": float(arm_limit_penalty),
+            # "arm_retract_penalty": float(arm_retract_penalty),
+            # "action_penalty": float(action_penalty),
+            # "success_bonus": float(success_bonus),
+            "action_id": int(a) if a is not None else -1,
+            "action_name": action_name,
+            # "arm_at_limit": bool(arm_at_limit),
+            # "arm_at_min_limit": bool(arm_at_min_limit),
+            # "arm_limit_truncated": bool(arm_limit_truncated),
+            "attempted_arm": bool(attempted["arm"]) if self.action_mode == "discrete" else False,
+            "attempted_lift": bool(attempted["lift"]) if self.action_mode == "discrete" else False,
+            "attempted_grip": bool(attempted["grip"]) if self.action_mode == "discrete" else False,
+            
+            # "prev_d": float(prev_d) if prev_d is not None else np.nan,
+            # "progress": float(progress),
+            # "time_penalty": float(time_penalty),
+            # "distance_weight": float(distance_weight),
+            # "distance_shaping": float(distance_shaping),
         }
 
         # Keep your "terminal_observation" convention for logging correctness

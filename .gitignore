@@ -20,5 +20,27 @@ wheels/
 .idea/
 MUJOCO_LOG.TXT
 
-# Temp runtime XML 
+# Temp runtime XML
 stretch_temp_abs.xml
+
+# Trained model files (SB3 checkpoints and zips)
+*.zip
+ppo_*
+*_ppo_*
+sac_*
+*_sac_*
+td3_*
+*_td3_*
+a2c_*
+dqn_*
+ddpg_*
+
+# Training logs (TensorBoard, etc.)
+logs/
+
+# Personal notes
+personal_notes/
+
+# Jupyter notebook artifacts
+.ipynb_checkpoints/
+*-checkpoint.ipynb
