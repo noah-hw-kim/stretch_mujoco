@@ -47,6 +47,11 @@ class MujocoServerProxies:
     _object_pose_cmd: "DictProxy[str, dict]"  # {"val": {"name": str, "pos": (x,y,z), "quat": (w,x,y,z), "trigger": bool}}
     # ===== END =====
 
+    # ===== Grip contact detection (added for pick-and-place) (4/16/2026) =====
+    _contact_object_name: "DictProxy[str, str]"  # {"val": "apple0_main"} — env sets target body name
+    _grip_contact: "DictProxy[str, bool]"         # {"val": False} — server writes each physics step
+    # ===== END =====
+
     def __setattr__(self, name: str, value) -> None:
         try:
             super().__setattr__(name, value)
@@ -135,6 +140,32 @@ class MujocoServerProxies:
     
     # ===== END =====
 
+    # ===== Grip contact proxy methods (4/16/2026) =====
+    def set_contact_object_name(self, body_name: str) -> None:
+        try:
+            self._contact_object_name["val"] = body_name
+        except BrokenPipeError:
+            ...
+
+    def get_contact_object_name(self) -> str:
+        try:
+            return self._contact_object_name["val"]
+        except BrokenPipeError:
+            return ""
+
+    def set_grip_contact(self, is_contact: bool) -> None:
+        try:
+            self._grip_contact["val"] = is_contact
+        except BrokenPipeError:
+            ...
+
+    def get_grip_contact(self) -> bool:
+        try:
+            return self._grip_contact["val"]
+        except BrokenPipeError:
+            return False
+    # ===== END =====
+
     @staticmethod
     def default(manager: SyncManager) -> "MujocoServerProxies":
         return MujocoServerProxies(
@@ -150,6 +181,11 @@ class MujocoServerProxies:
             _tracked_names=manager.list(),
             # Added (2/24/2026)to teleport the object
             _object_pose_cmd=manager.dict({"val": {"trigger": False}}),
+            # ===== END =====
+
+            # ===== grip contact detection (4/16/2026) =====
+            _contact_object_name=manager.dict({"val": ""}),
+            _grip_contact=manager.dict({"val": False}),
             # ===== END =====
         )
 
@@ -305,6 +341,14 @@ class MujocoServer:
         
         # ===== new (11/2/2025) =====
         self._tracked_body_ids: dict[str, int] = {}   # cache name->body id
+        # ===== END =====
+
+        # ===== grip contact detection (4/16/2026) =====
+        self._contact_gripper_geoms: set[int] = set()  # rubber tip geom IDs
+        self._contact_apple_geoms: set[int] = set()    # target object geom IDs
+        self._contact_obj_name_cache: str = ""         # last resolved object name
+        # Gripper rubber tip body names (same across all scenes — part of robot URDF)
+        self._GRIPPER_TIP_BODIES = ["rubber_tip_left", "rubber_tip_right"]
         # ===== END =====
 
         self.update_joint_limits()
@@ -546,7 +590,11 @@ class MujocoServer:
         # ===== new (11/2/2025) =====
         self._publish_objects_state()
         # Added (2/24/2026)to reset the object
-        self._apply_object_pose_requests()   # ADD THIS LINE
+        self._apply_object_pose_requests()
+        # ===== END =====
+
+        # ===== grip contact detection (4/16/2026) =====
+        self._publish_grip_contact()
         # ===== END =====
         
         self.push_command(self.data_proxies.get_command())
@@ -677,6 +725,51 @@ class MujocoServer:
         )
 
     
+    # ===== grip contact detection (4/16/2026) =====
+    def _resolve_contact_geoms(self, obj_name: str) -> None:
+        """Cache gripper tip and target object geom IDs. Called once per new obj_name."""
+        self._contact_gripper_geoms = set()
+        for body_name in self._GRIPPER_TIP_BODIES:
+            bid = mujoco.mj_name2id(self.mjmodel, mujoco.mjtObj.mjOBJ_BODY, body_name)
+            if bid >= 0:
+                start = int(self.mjmodel.body_geomadr[bid])
+                count = int(self.mjmodel.body_geomnum[bid])
+                self._contact_gripper_geoms.update(range(start, start + count))
+
+        self._contact_apple_geoms = set()
+        bid = mujoco.mj_name2id(self.mjmodel, mujoco.mjtObj.mjOBJ_BODY, obj_name)
+        if bid >= 0:
+            start = int(self.mjmodel.body_geomadr[bid])
+            count = int(self.mjmodel.body_geomnum[bid])
+            self._contact_apple_geoms.update(range(start, start + count))
+
+        self._contact_obj_name_cache = obj_name
+
+    def _publish_grip_contact(self) -> None:
+        """Check mjdata.contact each physics step and publish boolean to proxy."""
+        obj_name = self.data_proxies.get_contact_object_name()
+        if not obj_name:
+            return
+
+        # Re-resolve geom IDs if object name changed (e.g. after env reset)
+        if obj_name != self._contact_obj_name_cache:
+            self._resolve_contact_geoms(obj_name)
+
+        if not self._contact_gripper_geoms or not self._contact_apple_geoms:
+            return
+
+        is_contact = False
+        for i in range(self.mjdata.ncon):
+            c = self.mjdata.contact[i]
+            g1, g2 = int(c.geom1), int(c.geom2)
+            if (g1 in self._contact_gripper_geoms and g2 in self._contact_apple_geoms) or \
+               (g2 in self._contact_gripper_geoms and g1 in self._contact_apple_geoms):
+                is_contact = True
+                break
+
+        self.data_proxies.set_grip_contact(is_contact)
+    # ===== END =====
+
     # ===== new (11/2/2025) =====
     def _publish_objects_state(self) -> None:
         """

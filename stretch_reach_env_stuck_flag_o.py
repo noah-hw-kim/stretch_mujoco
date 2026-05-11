@@ -208,7 +208,7 @@ class StretchReachEnv(gym.Env):
         # observation = [lift, arm, gripper, ee_x, ee_y, ee_z, obj_x, obj_y, oPb_z, rel_x, rel_y, rel_z, lift_vel, arm_vel, gripper_vel] -> 15 dims
         self.observation_space = spaces.Dict(
             {
-                "observation": spaces.Box(low=-np.inf, high=np.inf, shape=(15,), dtype=np.float32),
+                "observation": spaces.Box(low=-np.inf, high=np.inf, shape=(16,), dtype=np.float32),
                 "achieved_goal": spaces.Box(low=-np.inf, high=np.inf, shape=(3,), dtype=np.float32),
                 "desired_goal": spaces.Box(low=-np.inf, high=np.inf, shape=(3,), dtype=np.float32),
             }
@@ -292,14 +292,20 @@ class StretchReachEnv(gym.Env):
         
         # 3. Joint Velocities (Passively changes the EE position)
         joint_vel = np.array([s.lift.vel, s.arm.vel, s.gripper.vel], dtype=np.float32)
+        
+        # 4. Stuck Flag (Tactile sensor)
+        # WARNING: Setting this to >=3 when termination is also >=3 means the agent
+        # will see this flag on the EXACT SAME FRAME it dies, giving it 0 steps to react.
+        stuck_flag = 1.0 if getattr(self, "_stuck_counter", 0) >= 3 else 0.0
 
-        # 15 dims: [joints(3), ee(3), obj(3), rel(3), joint_vel(3)]
+        # 16 dims: [joints(3), ee(3), obj(3), rel(3), joint_vel(3), stuck_flag(1)]
         obs_vec = np.concatenate([
             [lift, arm, grip], 
             ee, 
             obj, 
             rel_pos,
             joint_vel,
+            [stuck_flag],
         ]).astype(np.float32)
 
         return {
@@ -705,7 +711,7 @@ class StretchReachEnv(gym.Env):
         ee_z_at_reset = self._get_ee_pos()[2]
         self._started_below_safe_z = (self.safe_z is not None and ee_z_at_reset < self.safe_z)
 
-
+        
 
         obs = self._get_obs()
         self.prev_d = self._compute_distance(obs)
@@ -737,14 +743,8 @@ class StretchReachEnv(gym.Env):
         #             reward += 0.5
         #             self._safe_z_crossed = True
 
-        # If below the table rim, extending the arm or lowering the lift is dangerous
-        if self.action_mode == "discrete":
-            a_check = int(np.asarray(action).reshape(-1)[0]) if isinstance(action, (np.ndarray, list, tuple)) else int(action)
-            if a_check in [0, 4]: # lift_down or arm_out
-                ee_z = self._get_ee_pos()[2]
-                apple_z = self._get_obj_pos()[2]
-                if ee_z < apple_z - 0.01: # 1cm safety margin above stuck max (0.935)
-                    reward -= 0.50 # Massive penalty: mathematically overpowers the distance progress bonus
+        # If below the table rim, extending the arm or lowering the lift is dangerous.
+        # F11: Removed the -0.50 hardcoded penalty to allow the robot to figure it out using stuck_flag.
 
         if self.action_mode == "discrete":
             ee_z = self._get_ee_pos()[2]
@@ -786,17 +786,7 @@ class StretchReachEnv(gym.Env):
         obs = self._get_obs()
         d = self._compute_distance(obs)
         success = d < self.success_thresh
-        # Success gate: ee_z must be within 1cm below apple center.
-        # Blocks stuck-below-rim fake success (ee_z=0.83-0.935 CAN reach d<0.15).
-        # apple_z - 0.01 = ~0.945 sits between stuck max (0.935) and real success min (0.954+).
-        # Exact apple_z is too strict due to obs lag (~0.026m): ee_z reads 0.954 when settled at 0.956.
-
         is_grip_contact = self.sim.pull_grip_contact()   # True/False
-        if self.safe_z is not None:
-            apple_z = self._get_obj_pos()[2]
-            success = success
-            # success = success and (self._get_ee_pos()[2] >= apple_z - 0.01)
-            # success = is_grip_contact or (success and (self._get_ee_pos()[2] >= apple_z - 0.01))
         
         a = None
         if self.action_mode == "discrete":

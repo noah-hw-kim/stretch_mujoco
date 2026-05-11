@@ -10,7 +10,7 @@ from stretch_mujoco.enums.actuators import Actuators
 
 from collections import deque
 
-class StretchReachEnv(gym.Env):
+class StretchPickPlaceEnv(gym.Env):
     """
     Minimal Gymnasium env wrapper for StretchMujocoSimulator.
 
@@ -22,16 +22,10 @@ class StretchReachEnv(gym.Env):
     
     LIFT_MIN = 0.008
     LIFT_STEP = 0.045
-    LIFT_STEP_UP = 0.045
-    LIFT_STEP_DN = 0.032
     
     ARM_MIN = 0.0001 # actual min is 0.000006
     ARM_STEP = 0.015
-    
-    # Universal stuck detection threshold for all joints.
-    # Free lift_down: ~0.010-0.015, free arm_out: ~0.005
-    # Stuck lift: ~0.0001-0.0003, stuck arm: ~0.0000
-    STUCK_DELTA_THRESHOLD = 0.002
+    ARM_STUCK_DELTA_THRESHOLD = 0.002
     
     GRIPPER_MIN = 0.004
     GRIPPER_STEP = 0.025
@@ -128,8 +122,8 @@ class StretchReachEnv(gym.Env):
         hard_y_range: Tuple[float, float] = (-0.6, -0.4),
         lift_start_pos: float = 1.1,
         lift_start_random: bool = False,
-        lift_start_below_range: Tuple[float, float] = (0.6, 0.88),   # below table
-        lift_start_above_range: Tuple[float, float] = (0.88, 1.1),   # above table
+        lift_start_below_range: Tuple[float, float] = (0.6, 0.8),   # below table
+        lift_start_above_range: Tuple[float, float] = (0.95, 1.1),   # above table
     ):
         super().__init__()
         self.sim = sim
@@ -170,8 +164,6 @@ class StretchReachEnv(gym.Env):
         
         # Episode counter
         self._step_count = 0
-        # Consecutive stuck counter for arm_out (reset each episode)
-        self._stuck_counter = 0
         
         # # Rolling window for stuck detection
         # self._recent_d = deque(maxlen=int(self.STUCK_WINDOW))
@@ -638,20 +630,18 @@ class StretchReachEnv(gym.Env):
     def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None):
         super().reset(seed=seed)
         self._step_count = 0
-        self._stuck_counter = 0
         # self._recent_d.clear()
 
         # Ensure objects are registered for tracking (do this once per reset)
         # If you want to track only the target object, replace with [self.obj_name]
         self.sim.register_tracked_objects([self.obj_name])
-        self.sim.register_contact_check(self.obj_name)
 
         # Put robot in a known starting pose (simple neutral)
         # These are safe-ish defaults, tweak as needed.
         
-        self.sim._last_movement_positions.pop(Actuators.arm, None)
         self.sim.move_to(Actuators.arm, 0.1)
         self.sim.wait_while_is_moving(Actuators.arm)
+        # self._wait_sim_dt()
 
         if self.lift_start_random:
             # 50/50 split: below table or above table
@@ -662,13 +652,12 @@ class StretchReachEnv(gym.Env):
         else:
             lift_pos = self.lift_start_pos
 
-        self.sim._last_movement_positions.pop(Actuators.lift, None)
         self.sim.move_to(Actuators.lift, lift_pos)
-        self.sim.wait_while_is_moving(Actuators.lift, timeout=10.0)
-
-        self.sim._last_movement_positions.pop(Actuators.gripper, None)
-        self.sim.move_to(Actuators.gripper, 0.45)
+        self.sim.wait_while_is_moving(Actuators.lift)
+        
+        self.sim.move_to(Actuators.gripper, -0.064)  # pick a neutral open value for your sim
         self.sim.wait_while_is_moving(Actuators.gripper)
+        # self._wait_sim_dt()
 
         # self.sim.home()
         # self._wait_sim_dt()
@@ -705,8 +694,6 @@ class StretchReachEnv(gym.Env):
         ee_z_at_reset = self._get_ee_pos()[2]
         self._started_below_safe_z = (self.safe_z is not None and ee_z_at_reset < self.safe_z)
 
-
-
         obs = self._get_obs()
         self.prev_d = self._compute_distance(obs)
 
@@ -722,33 +709,14 @@ class StretchReachEnv(gym.Env):
         
         # # Apply action and wait one control tick
 
-        # DEPRECATED AFTER F4 (KILLED ARM motion)
-        # # ← ADD THIS BLOCK HERE, before _apply_action_discrete
-        # if self.action_mode == "discrete":
-        #     a_check = int(np.asarray(action).reshape(-1)[0]) if isinstance(action, (np.ndarray, list, tuple)) else int(action)
-        #     ee_z = self._get_ee_pos()[2]
-        #     if self.safe_z is not None and ee_z < self.safe_z:
-        #         if a_check in [3, 4]:
-        #             reward -= 0.50  # F1: extreme penalty to escape below-table local optimum
-        #     elif self.safe_z is not None and ee_z >= self.safe_z:
-        #         # One-time bonus: only fires when robot EARNED it by lifting up.
-        #         # Does NOT fire for above-table starts where ee_z was already above safe_z.
-        #         if not self._safe_z_crossed and self._started_below_safe_z:
-        #             reward += 0.5
-        #             self._safe_z_crossed = True
-
-        # If below the table rim, extending the arm or lowering the lift is dangerous
+        # ← ADD THIS BLOCK HERE, before _apply_action_discrete
         if self.action_mode == "discrete":
             a_check = int(np.asarray(action).reshape(-1)[0]) if isinstance(action, (np.ndarray, list, tuple)) else int(action)
-            if a_check in [0, 4]: # lift_down or arm_out
-                ee_z = self._get_ee_pos()[2]
-                apple_z = self._get_obj_pos()[2]
-                if ee_z < apple_z - 0.01: # 1cm safety margin above stuck max (0.935)
-                    reward -= 0.50 # Massive penalty: mathematically overpowers the distance progress bonus
-
-        if self.action_mode == "discrete":
             ee_z = self._get_ee_pos()[2]
-            if self.safe_z is not None and ee_z >= self.safe_z:
+            if self.safe_z is not None and ee_z < self.safe_z:
+                if a_check in [3, 4]:
+                    reward -= 0.50  # F1: extreme penalty to escape below-table local optimum
+            elif self.safe_z is not None and ee_z >= self.safe_z:
                 # One-time bonus: only fires when robot EARNED it by lifting up.
                 # Does NOT fire for above-table starts where ee_z was already above safe_z.
                 if not self._safe_z_crossed and self._started_below_safe_z:
@@ -790,13 +758,10 @@ class StretchReachEnv(gym.Env):
         # Blocks stuck-below-rim fake success (ee_z=0.83-0.935 CAN reach d<0.15).
         # apple_z - 0.01 = ~0.945 sits between stuck max (0.935) and real success min (0.954+).
         # Exact apple_z is too strict due to obs lag (~0.026m): ee_z reads 0.954 when settled at 0.956.
-
-        is_grip_contact = self.sim.pull_grip_contact()   # True/False
         if self.safe_z is not None:
             apple_z = self._get_obj_pos()[2]
-            success = success
-            # success = success and (self._get_ee_pos()[2] >= apple_z - 0.01)
-            # success = is_grip_contact or (success and (self._get_ee_pos()[2] >= apple_z - 0.01))
+            # success = success
+            success = success and (self._get_ee_pos()[2] >= apple_z - 0.01)
         
         a = None
         if self.action_mode == "discrete":
@@ -807,7 +772,6 @@ class StretchReachEnv(gym.Env):
                 a = int(action)
                 
         s = self._get_status()
-        
                 
         # # Default values for logging/logic variables that were commented out
         # arm_limit_penalty = 0.0
@@ -870,32 +834,12 @@ class StretchReachEnv(gym.Env):
         # --- REWARD REDESIGN ---
         actual_delta_arm = float(s.arm.pos) - float(s_before.arm.pos)
         stuck_terminated = False
-        
-        # if self.action_mode == "discrete" and a == 4:
-        #     if abs(actual_delta_arm) < self.STUCK_DELTA_THRESHOLD:
-        #         # Stuck: terminate episode with large negative reward for fast credit assignment.
-        #         # Replaces the old -0.15/step which was too slow to propagate to the decision point.
-        #         reward -= 20.0
-        #         stuck_terminated = True
-
-        # Check stuck termination more carefully. Sometimes the action changes makes the first new motion barely moves. Let's give 5 timesteps to be sure it got stucked
-        # Detect stuck for BOTH arm_out AND lift_down
-        if self.action_mode == "discrete" and a in [0, 4]:
-            if a == 4:
-                actual_delta = abs(actual_delta_arm)
-            else:  # a == 0 (lift_down)
-                actual_delta = abs(float(s.lift.pos) - float(s_before.lift.pos))
-            
-            if actual_delta < self.STUCK_DELTA_THRESHOLD:
-                self._stuck_counter += 1
-                if self._stuck_counter >= 5:
-                    reward -= 20.0
-                    stuck_terminated = True
-                    self._stuck_counter = 0
-            else:
-                self._stuck_counter = 0
-        else:
-            self._stuck_counter = 0
+        if self.action_mode == "discrete" and a == 4:
+            if abs(actual_delta_arm) < self.ARM_STUCK_DELTA_THRESHOLD:
+                # Stuck: terminate episode with large negative reward for fast credit assignment.
+                # Replaces the old -0.15/step which was too slow to propagate to the decision point.
+                reward -= 20.0
+                stuck_terminated = True
 
         # E5: Lift progress bonus below safe_z.
         # Makes lift_up more rewarding than arm_out in the switch-boundary zone (ee_z 0.91–1.03).
@@ -953,7 +897,6 @@ class StretchReachEnv(gym.Env):
         # --- REWARD PART END ---
         
         action_name = self.ACTION_NAME_ALL.get(a, str(a)) if a is not None else "continuous"
-
         
         ee_z = float(obs["achieved_goal"][2])
         goal_z = float(obs["desired_goal"][2])
@@ -1004,8 +947,6 @@ class StretchReachEnv(gym.Env):
             # "time_penalty": float(time_penalty),
             # "distance_weight": float(distance_weight),
             # "distance_shaping": float(distance_shaping),
-
-            "is_grip_contact": bool(is_grip_contact)
         }
 
         # Keep your "terminal_observation" convention for logging correctness

@@ -578,6 +578,23 @@ class StretchMujocoSimulator:
         }
     
     
+    # ===== Added (4/16/2026)to track contact =====
+    def register_contact_check(self, obj_body_name: str) -> None:
+        """
+        Tell the server which object body to use for grip contact detection.
+        Call once at env reset (before stepping).
+        The server resolves geom IDs from body name at runtime.
+        """
+        self.data_proxies.set_contact_object_name(obj_body_name)
+
+    def pull_grip_contact(self) -> bool:
+        """
+        Return True if the gripper rubber tips are currently in contact
+        with the object registered via register_contact_check().
+        Updated every physics step by the server.
+        """
+        return self.data_proxies.get_grip_contact()
+
     # ===== new (2/24/2026), Added (2/24/2026)to reset the object =====
     def set_object_pose(self, body_name: str, pos_xyz, quat_wxyz=(1,0,0,0)):
         self.data_proxies.request_object_pose(body_name, pos_xyz, quat_wxyz)
